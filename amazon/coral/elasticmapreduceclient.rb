@@ -152,7 +152,7 @@ module Amazon
       def AddJobFlowSteps(input = {})
         newAddJobFlowStepsCall.call(input)
       end
-      
+
       # Shorthand method to invoke the AddInstanceGroups operation:
       #
       # Example usage:

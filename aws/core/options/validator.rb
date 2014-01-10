@@ -98,13 +98,13 @@ module AWS
         # Ensures the value is a string.
         def validate_string rules, value, opt_name, context = nil
 
-          unless value.respond_to?(:to_str)
+          unless value.respond_to?(:to_s)
             format_error('string value', opt_name, context)
           end
 
           rules[:lstrip] ?
-            value.to_str.sub(/^#{rules[:lstrip]}/, '') :
-            value.to_str
+            value.to_s.sub(/^#{rules[:lstrip]}/, '') :
+            value.to_s
         end
 
         # Ensures the value is a boolean.

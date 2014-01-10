@@ -13,7 +13,7 @@ module Amazon
       @log               = options[:log] || StdErrLogger.new
       @backoff_seconds   = options[:backoff_seconds] || 2
       @backoff_mult      = options[:backoff_mult] || 1.5
-      @retries           = options[:retries] || 8
+      @retries           = options[:retries] || 0
       @retry_if          = options[:retry_if]
       @pass_exceptions   = options[:pass_exceptions] || [ScriptError, SignalException, ArgumentError, StandardError]
       @retry_exceptions  = options[:retry_exceptions] || [IOError, EOFError, RuntimeError]
@@ -48,7 +48,7 @@ module Amazon
       rescue Exception => e
         if retries_remaining > 0 && is_retry_exception(e) then
           if @log != nil then
-            @log.info "Exception #{e.to_str} while calling #{method} on #{@client.class}, retrying in #{@backoff_seconds * backoff_mult} seconds."
+            @log.info "Exception #{e.to_s} while calling #{method} on #{@client.class}, retrying in #{@backoff_seconds * backoff_mult} seconds."
           end
           sleep(@backoff_seconds * backoff_mult)
           backoff_mult *= 2
@@ -56,7 +56,7 @@ module Amazon
           retry
         else
           if @log != nil then
-            @log.info "Exception #{e.to_str} while calling #{method} on #{@client.class}, failing"
+            @log.info "Exception #{e.to_s} while calling #{method} on #{@client.class}, failing"
           end
           raise e
         end

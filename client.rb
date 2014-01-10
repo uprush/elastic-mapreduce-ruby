@@ -46,11 +46,11 @@ class EmrClient
       false
     else
       ret = false
-      if response['Error'] then 
+      if response['Error'] then
         # note: 'Timeout' is not retryable because the operation might have completed just the connection timed out
         ret ||= ['InternalFailure', 'Throttling', 'ServiceUnavailable'].include?(response['Error']['Code'])
       end
-      ret 
+      ret
     end
   end
 
@@ -123,14 +123,14 @@ class EmrClient
     result = @client.ModifyInstanceGroups(options)
     logger.trace result.inspect
     return raise_on_error(result)
-  end    
+  end
 
   def add_instance_groups(options)
     logger.trace "AddInstanceGroups(#{options.inspect})"
     result = @client.AddInstanceGroups(options)
     logger.trace result.inspect
     return raise_on_error(result)
-  end    
+  end
 
   def add_tags(resource_id, tags)
     logger.trace "AddTags('ResourceId' => #{resource_id}, 'Tags' => #{tags.inspect})"

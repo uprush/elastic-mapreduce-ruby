@@ -20,7 +20,7 @@ module Amazon
       # provided Call object and input hash.
       def dispatch(call, input)
         request = {
-          :operation_name => @operation_name, :service_name => @service_name, 
+          :operation_name => @operation_name, :service_name => @service_name,
           :identity => call.identity, :id => call.request_id, :value => input
         }
         reply = @orchestrator.orchestrate(request)

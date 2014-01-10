@@ -6,7 +6,7 @@ require 'uuidtools'
 module Amazon
   module Coral
 
-    class Call 
+    class Call
 
       # Create a new Call object tied to a specific Dispatcher.
       def initialize(dispatcher)

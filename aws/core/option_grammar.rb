@@ -66,7 +66,7 @@ module AWS
   #               else false
   #               end
   #             end
-  #               value.respond_to? :to_str
+  #               value.respond_to? :to_s
           end
 
           def encode_value(value)
@@ -91,7 +91,7 @@ module AWS
 
           def validate(value, context = nil)
             raise format_error("string value", context) unless
-              value.respond_to? :to_str
+              value.respond_to? :to_s
           end
 
           def encode_value(value)
@@ -107,7 +107,7 @@ module AWS
 
           def validate(value, context = nil)
             raise format_error("string value", context) unless
-              value.respond_to? :to_str
+              value.respond_to? :to_s
           end
 
           def encode_value(value)
@@ -669,7 +669,7 @@ module AWS
         def apply_string_descriptor(m, name)
           MetaUtils.extend_method(m, "validate_#{ruby_name(name)}") do |value|
             raise ArgumentError.new("expected string value for option #{ruby_name(name)}") unless
-              value.respond_to? :to_str
+              value.respond_to? :to_s
           end
         end
 
