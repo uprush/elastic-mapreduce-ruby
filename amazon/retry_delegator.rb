@@ -13,7 +13,7 @@ module Amazon
       @log               = options[:log] || StdErrLogger.new
       @backoff_seconds   = options[:backoff_seconds] || 2
       @backoff_mult      = options[:backoff_mult] || 1.5
-      @retries           = options[:retries] || 0
+      @retries           = options[:retries] || 8
       @retry_if          = options[:retry_if]
       @pass_exceptions   = options[:pass_exceptions] || [ScriptError, SignalException, ArgumentError, StandardError]
       @retry_exceptions  = options[:retry_exceptions] || [IOError, EOFError, RuntimeError]
