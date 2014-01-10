@@ -7,10 +7,12 @@ require 'optparse'
 require 'client'
 require 'ec2_client_wrapper'
 require 'open3'
+require 'aws/iam'
+require 'ec2_roles'
 
 module Commands
 
-  ELASTIC_MAPREDUCE_CLIENT_VERSION = "2012-09-18"
+  ELASTIC_MAPREDUCE_CLIENT_VERSION = "2013-12-10"
 
   class Commands
     attr_accessor :opts, :global_options, :commands, :logger, :executor
@@ -52,7 +54,7 @@ module Commands
     def parse_command(klass, name, description)
       @opts.on(name, description) do |arg|
         self << klass.new(name, description, arg, self)
-      end      
+      end
     end
 
     def parse_option(klass, name, description, parent_commands, *args)
@@ -180,6 +182,22 @@ module Commands
       return jobflow_ids.first
     end
 
+    def is_govcloud?
+      # !! = convert to boolean
+      !!(get_field(:endpoint) =~ /us-gov-west-1/)
+    end
+
+    def tag_objects(tags)
+      tags.map { |kv|
+        tokens = kv.split("=")
+        key = tokens[0]
+        value = nil
+        if (tokens.size > 1) then
+          value = tokens[1]
+        end
+        { "Key" => key, "Value" => value }
+      }
+    end
   end
 
   class CommandOption
@@ -202,12 +220,16 @@ module Commands
           return command
         end
       end
-      raise RuntimeError, "Expected argument #{name} to follow one of #{parent_commands.join(", ")}"
+      if parent_commands.size > 1 then
+        raise RuntimeError, "Expected argument #{name} to follow one of #{parent_commands.join(", ")}"
+      else
+        raise RuntimeError, "Expected argument #{name} to follow #{parent_commands.join(", ")}"
+      end
     end
   end
 
   class StepCommand < Command
-    attr_accessor :args, :step_name, :step_action, :apps_path, :beta_path
+    attr_accessor :args, :step_name, :step_action, :apps_path
     attr_accessor :script_runner_path, :pig_path, :hive_path, :pig_cmd, :hive_cmd, :enable_debugging_path
 
     def initialize(*args)
@@ -355,7 +377,7 @@ module Commands
       end
       if require_single_version then
         if versions.split(",").size != 1 then
-          raise RuntimeError, "Only one version my be specified for --pig-script"
+          raise RuntimeError, "Only one version may be specified for --pig-script"
         end
       end
       return ["--pig-versions", versions]
@@ -388,6 +410,7 @@ module Commands
   class PigInteractiveCommand < PigCommand
     def self.new_from_commands(commands, parent)
       sc = self.new("--pig-interactive", "Run a jobflow with Pig Installed", nil, commands)
+      sc.pig_versions = parent.pig_versions
       sc.step_action = parent.step_action
       return sc
     end
@@ -448,7 +471,7 @@ module Commands
     end
 
     def hbase_jar_path
-      "/home/hadoop/lib/hbase-0.92.0.jar"      
+      "/home/hadoop/lib/hbase.jar"
     end
 
     def install_script
@@ -655,7 +678,7 @@ module Commands
       end
       if require_single_version then
         if versions.split(",").size != 1 then
-          raise RuntimeError, "Only one version my be specified for --hive-script"
+          raise RuntimeError, "Only one version may be specified for --hive-script"
         end
       end
       return ["--hive-versions", versions]
@@ -1059,6 +1082,9 @@ module Commands
   class AddJobFlowStepsCommand < StepProcessingCommand
 
     def add_step_command(step)
+      if step.is_a?(ImpalaScriptCommand) then
+        @has_impala_script_command = true
+      end
       @step_commands << step
     end
 
@@ -1071,6 +1097,9 @@ module Commands
     def enact(client)
       jobflow_id = require_single_jobflow
       jobflow = client.describe_jobflow_with_id(jobflow_id)
+      if defined?(@has_impala_script_command) && @has_impala_script_command == true && ImpalaScriptCommand.check_installed(jobflow) == false then
+        raise RuntimeError, "Impala is not installed"
+      end
       self.step_commands = reorder_steps(jobflow, self.step_commands)
       jobflow_steps = step_commands.map { |x| x.steps }.flatten
       client.add_steps(jobflow_id, jobflow_steps)
@@ -1080,11 +1109,12 @@ module Commands
 
   class CreateJobFlowCommand < StepProcessingCommand
     attr_accessor :jobflow_name, :alive, :with_termination_protection, :visible_to_all_users,
-      :instance_count, :slave_instance_type, 
-      :master_instance_type, :key_pair, :key_pair_file, :log_uri, :az, :ainfo, :ami_version, :with_supported_products,
+      :instance_count, :slave_instance_type, :jobflow_role,
+      :master_instance_type, :key_pair, :key_pair_file, :log_uri,
+      :az, :ainfo, :ami_version, :with_supported_products,
       :hadoop_version, :plain_output, :instance_type,
-      :instance_group_commands, :bootstrap_commands, :subnet_id
-
+      :instance_group_commands, :bootstrap_commands, :subnet_id,
+      :supported_product_commands, :tags
 
     OLD_OPTIONS = [:instance_count, :slave_instance_type, :master_instance_type]
     # FIXME: add code to setup collapse instance group commands
@@ -1099,31 +1129,133 @@ module Commands
       super(*args)
       @instance_group_commands = []
       @bootstrap_commands = []
+      @supported_product_commands = []
+      @tags = []
+    end
+
+    def find_command(cmds, target)
+      for cmd in cmds do 
+        if cmd.is_a?(target) then
+          return cmd
+        end
+      end
+      return nil
     end
 
     def add_step_command(step)
       @step_commands << step
     end
 
-    def add_bootstrap_command(bootstrap_command)
+    def find_step_command(target)
+      return find_command(step_commands, target)
+    end
+
+    def add_bootstrap_command(bootstrap_command) 
       @bootstrap_commands << bootstrap_command
+    end
+
+    def find_bootstrap_command(target)
+      return find_command(bootstrap_commands, target)
     end
 
     def add_instance_group_command(instance_group_command)
       @instance_group_commands << instance_group_command
     end
 
+    def add_supported_product_command(supported_product_command)
+      @supported_product_commands << supported_product_command
+    end
+
     def validate
       for step in step_commands do
         if step.is_a?(EnableDebuggingCommand) then
+          if is_govcloud?
+            raise RuntimeError, "Debugging is not supported in GovCloud."
+          end
           require(:log_uri, "You must supply a logUri if you enable debugging when creating a job flow")
         end
       end
 
-      for cmd in step_commands + instance_group_commands + bootstrap_commands do
+      for cmd in step_commands + instance_group_commands + bootstrap_commands + supported_product_commands do
         cmd.validate
       end
 
+      if is_govcloud?
+        require(:jobflow_role, "Missing --jobflow-role argument. An EC2 role must be used in GovCloud.")
+      end
+
+      jobflow_role = get_field(:jobflow_role)
+
+      # Only do role validation and creation if AMI is 2.3 or later.
+      ami_version = get_field(:ami_version)
+      if jobflow_role and (ami_version.nil? or
+                           ami_version == "latest" or
+                           ami_version >= "2.3")
+        validate_jobflow_role(jobflow_role)
+      end
+    end
+
+    def role_exists?(role_name, client)
+      begin
+        client.get_instance_profile(:instance_profile_name => role_name)
+        client.get_role(:role_name  => role_name)
+      rescue AWS::Errors::Base => e
+        if e.message =~ /NoSuchEntity/
+          # No such instance profile/role.
+          return false
+        else
+          # Some other error: reraise.
+          raise e
+        end
+      end
+      return true
+    end
+
+    def create_iam_client
+      access_id = @commands.global_options[:aws_access_id]
+      secret_key = @commands.global_options[:aws_secret_key]
+      iam_endpoint = (is_govcloud?)? 'iam.us-gov.amazonaws.com' : 'iam.amazonaws.com'
+      iam_client = AWS::IAM.new(:access_key_id => access_id,
+                                :secret_access_key => secret_key,
+                                :iam_endpoint => iam_endpoint)
+      client = iam_client.client
+    end
+
+    def create_role_and_profile(jobflow_role, client)
+      puts "Creating an EC2 role #{jobflow_role}..."
+
+      # Steps:
+      # 1. Create role (CreateRole)
+      # 2. Add policy to role (PutRolePolicy)
+      # 3. CreateInstanceProfile
+      # 4. AddRoleToInstanceProfile
+
+      client.create_role(:role_name => jobflow_role,
+                         :assume_role_policy_document => EC2Roles::ROLE_DEF)
+
+      # Role name and policy name can be different.
+      client.put_role_policy(:role_name => jobflow_role,
+                             :policy_name => jobflow_role,
+                             :policy_document => EC2Roles::POLICY_DOC)
+
+      client.create_instance_profile(:instance_profile_name => jobflow_role)
+
+      # IP name and role name are required to match by EC2.
+      client.add_role_to_instance_profile(:instance_profile_name => jobflow_role,
+                                          :role_name => jobflow_role)
+
+      puts "Role created."
+    end
+
+    def validate_jobflow_role(jobflow_role)
+      client = create_iam_client
+      if not role_exists?(jobflow_role, client)
+        if jobflow_role == EC2Roles::DEFAULT_EMR_ROLE
+          create_role_and_profile(jobflow_role, client)
+        else
+          raise RuntimeError, "Specified EC2 role #{jobflow_role} does not exist. Please specify a valid EC2 role or use \"--jobflow-role #{EC2Roles::DEFAULT_EMR_ROLE}\"."
+        end
+      end
     end
 
     def enact(client)
@@ -1136,8 +1268,17 @@ module Commands
       apply_jobflow_option(:log_uri, "LogUri")
       apply_jobflow_option(:ami_version, "AmiVersion")
       apply_jobflow_option(:subnet_id, "Instances", "Ec2SubnetId")
- 
+      apply_jobflow_option(:jobflow_role, "JobFlowRole")
+
       @jobflow["AmiVersion"] ||= "latest"
+
+      # when creating a job with --impala-script specified, --impala-interactive 
+      # will be added automatically. however, when adding a step to an existing
+      # cluster with --impala-script, impala-interactive won't be added
+      impala_script_step = find_step_command(ImpalaScriptCommand)
+      if !impala_script_step.nil? && (find_bootstrap_command(ImpalaInteractiveCommand)).nil? then
+        bootstrap_commands << ImpalaInteractiveCommand.new_from_commands(commands, impala_script_step)
+      end
 
       self.step_commands = reorder_steps(@jobflow, self.step_commands)
       @jobflow["Steps"] = step_commands.map { |x| x.steps }.flatten
@@ -1173,6 +1314,13 @@ module Commands
         end
       end
 
+      for supported_product_command in supported_product_commands do
+        product = supported_product_command.supported_product
+        @jobflow["NewSupportedProducts"] << product
+      end
+
+      @jobflow["Tags"] = tag_objects(tags)
+
       run_result = client.run_jobflow(@jobflow)
       jobflow_id = run_result['JobFlowId']
       commands.global_options[:jobflow] << jobflow_id 
@@ -1185,6 +1333,7 @@ module Commands
     end
 
     def apply_jobflow_option(field_symbol, *keys)
+      # Copy value from @global_options (via get_field) to @jobflow dictionary.
       value = get_field(field_symbol)
       if value != nil then 
         map = @jobflow
@@ -1249,6 +1398,7 @@ module Commands
         "Steps" => [],
         "BootstrapActions" => [],
         "VisibleToAllUsers" => (get_field(:visible_to_all_users) ? "true" : "false"),
+        "NewSupportedProducts" => [],
       }
       products_string = get_field(:with_supported_products)
       if products_string then
@@ -1264,6 +1414,23 @@ module Commands
         name += " (requires manual termination)"
       end
       return name
+    end
+  end
+
+  class SupportedProductCommand < Command
+    attr_accessor :name, :args
+
+    def initialize(*args)
+      super(*args)
+      @args = []
+    end
+
+    def supported_product()
+      product = {
+        "Name" => @arg,
+        "Args" => @args
+      }
+      return product 
     end
   end
 
@@ -1285,6 +1452,83 @@ module Commands
       }
       return [ action ]
     end
+  end
+
+  class ImpalaScriptCommand < StepCommand
+    attr_accessor :impala_output, :impala_conf, :impala_version
+
+    def default_impala_path
+      File.join(get_field(:apps_path), "libs/impala/setup-impala")
+    end
+
+    def steps
+      if @arg.nil? || @arg.empty? then
+          raise RuntimeError, "S3 path to impala script is not provided"
+      end
+      run_script_args = ["--run-impala-script", "--impala-script", @arg]
+      output_path_args = []
+      output_path = get_field(:impala_output, "")
+      if !output_path.empty? then
+        output_path_args = [ "--console-output-path", output_path]
+      end
+      step = {
+        "Name"            => get_field(:step_name, "Run Impala Script"),
+        "ActionOnFailure" => get_field(:step_action, "CANCEL_AND_WAIT"),
+        "HadoopJarStep"   => {
+          "Jar" => get_field(:script_runner_path),
+          "Args" => [ get_field(:impala_path) ] + run_script_args + output_path_args
+        }
+      }
+      [ step ]
+    end
+
+    def self.check_installed(jobflow)
+      install_ba = jobflow['BootstrapActions'].select do |ba|
+        ba["BootstrapActionConfig"]["ScriptBootstrapAction"]["Path"].end_with?("libs/impala/setup-impala")
+      end
+      return install_ba.size > 0
+    end
+  end
+
+
+  class ImpalaInteractiveCommand < BootstrapActionCommand
+    attr_accessor :apps_path, :impala_path, :impala_args, :impala_version, :impala_conf
+
+    def get_impala_version
+      versions = get_field(:impala_version, "latest")
+      if versions.split(",").size != 1 then
+        raise RuntimeError, "Only one version may be specified for --impala-interactive"
+      else
+        return versions
+      end
+    end
+
+    def default_impala_path
+      File.join(get_field(:apps_path), "libs/impala/setup-impala")
+    end
+
+    def default_impala_args
+      [ "--base-path", get_field(:apps_path), "--impala-version",  get_impala_version, "--impala-conf", get_field(:impala_conf, "")]
+    end
+
+    def bootstrap_actions(index)
+      action = {
+        "Name" => "Setup Impala",
+        "ScriptBootstrapAction" => {
+          "Path" => get_field(:impala_path),
+          "Args" => get_field(:impala_args)
+        }
+      }
+      return [ action ]
+    end
+
+    def self.new_from_commands(commands, parent)
+      bc = self.new("--impala-interactive", "Add a bootstrap action to setup Impala", nil, commands)
+      bc.impala_version = parent.impala_version
+      bc.impala_conf = parent.impala_conf
+      return bc
+    end
+
   end
 
   class AbstractListCommand < Command
@@ -1389,6 +1633,61 @@ module Commands
     end
   end
 
+  class AddTagsActionCommand < Command
+    attr_accessor :tags
+
+    def initialize(*args)
+      super(*args)
+      @tags = []
+    end
+
+    def enact(client)
+      resource_id = require_single_jobflow
+
+      new_tags = tag_objects(tags)
+
+      client.add_tags(resource_id, new_tags)
+      logger.puts "Added tags " + new_tags.inspect  + " to " + resource_id
+    end
+  end
+
+  class RemoveTagsActionCommand < Command
+    attr_accessor :tag_keys
+
+    def initialize(*args)
+      super(*args)
+      @tag_keys = []
+    end
+
+    def enact(client)
+      resource_id = require_single_jobflow
+      keys = get_field(:tag_keys, []).map { |x| x.split(",") }.flatten
+      if keys.size == 0 then
+        raise RuntimeError, "Please specify at least one tag key"
+      end
+      client.remove_tags(resource_id, keys)
+      logger.puts "Removed tags with keys " +  keys.inspect + " from " + resource_id
+    end
+  end
+
+  class ListTagsActionCommand < Command
+    def enact(client)
+      resource_id = require_single_jobflow
+      result = client.describe_cluster(resource_id)
+      tags = result['Cluster']['Tags']
+      if tags.nil? or tags.size == 0 then
+        logger.puts "#{resource_id} has no tags associated with it"
+      else
+        for tag in tags do
+          row = []
+          row << sprintf("  Key: %-20s", tag['Key'])
+          row << sprintf("  Value: %-20s", tag['Value'])
+          logger.puts row.join("")
+        end
+      end
+    end
+  end
+
   class VersionCommand < Command
     def enact(client)
       logger.puts "Version #{ELASTIC_MAPREDUCE_CLIENT_VERSION}"
@@ -1442,6 +1741,10 @@ module Commands
         "InstanceType"  => get_field(:instance_type)
       }
       if get_field(:bid_price, nil) != nil
+        if is_govcloud?
+          raise RuntimeError, "SPOT instances (--bid-price) are not supported in GovCloud."
+        end
+
         ig["BidPrice"] = get_field(:bid_price)
         ig["Market"] = "SPOT"
       else
@@ -1753,7 +2056,8 @@ module Commands
 
     commands.opts = opts
 
-    step_commands = ["--jar", "--resize-jobflow", "--enable-debugging", "--hive-interactive", "--pig-interactive", "--hive-script", "--pig-script", "--hive-site", "--script"]
+    step_commands = ["--jar", "--resize-jobflow", "--enable-debugging", "--hive-interactive", 
+                     "--pig-interactive", "--hive-script", "--pig-script", "--hive-site", "--script"]
 
     opts.separator "\n  Creating Job Flows\n"
 
@@ -1768,13 +2072,15 @@ module Commands
       [ OptionWithArg, "--slave-instance-type TYPE",  "The type of the slave instances to launch", :slave_instance_type ],
       [ OptionWithArg, "--master-instance-type TYPE", "The type of the master instance to launch", :master_instance_type ],
       [ OptionWithArg, "--ami-version VERSION",       "The version of ami to launch the job flow with", :ami_version ],
-      [ OptionWithArg, "--key-pair KEY_PAIR",         "The name of your Amazon EC2 Keypair", :key_pair ], 
+      [ OptionWithArg, "--key-pair KEY_PAIR",         "The name of your Amazon EC2 Keypair", :key_pair ],
+      [ OptionWithArg, "--jobflow-role ROLE",         "Use specified EC2 role to start instances", :jobflow_role],
       [ OptionWithArg, "--availability-zone A_Z",     "Specify the Availability Zone in which to launch the job flow", :az ],
       [ OptionWithArg, "--info INFO",                 "Specify additional info to job flow creation", :ainfo ],
       [ OptionWithArg, "--hadoop-version VERSION",    "Specify the Hadoop Version to install", :hadoop_version ],
       [ FlagOption,    "--plain-output",              "Return the job flow id from create step as simple text", :plain_output ],
       [ OptionWithArg, "--subnet EC2-SUBNET_ID",      "Specify the VPC subnet that you want to run in", :subnet_id ],
     ])
+
     commands.parse_command(CreateInstanceGroupCommand, "--instance-group ROLE", "Specify an instance group while creating a jobflow")
     commands.parse_options(["--instance-group", "--add-instance-group"], [
       [OptionWithArg, "--bid-price PRICE",        "The bid price for this instance group", :bid_price]
@@ -1782,7 +2088,7 @@ module Commands
 
     opts.separator "\n  Passing arguments to steps\n"
     
-    commands.parse_options(step_commands + ["--bootstrap-action", "--stream"], [
+    commands.parse_options(step_commands + ["--bootstrap-action", "--stream", "--supported-product"], [
       [ ArgsOption,    "--args ARGS",                 "A command separated list of arguments to pass to the step" ],
       [ ArgOption,     "--arg ARG",                   "An argument to pass to the step" ],
       [ OptionWithArg, "--step-name STEP_NAME",       "Set name for the step", :step_name ],
@@ -1801,6 +2107,19 @@ module Commands
     commands.parse_command(JsonStepCommand, "--json FILE", "Add a sequence of steps stored in the json file FILE")
     commands.parse_options(["--json"], [
       [ ParamOption, "--param VARIABLE=VALUE ARGS", "Substitute the string VARIABLE with the string VALUE in the json file", :variables ],
+    ])
+
+
+    opts.separator "\n  Impala Options\n"
+
+    commands.parse_command(ImpalaInteractiveCommand, "--impala-interactive", "Add a bootstrap action to setup Impala")
+    commands.parse_command(ImpalaScriptCommand, "--impala-script [SCRIPT]", "Add a step that runs an Impala script")
+    commands.parse_options(["--impala-interactive", "--impala-script"], [
+      [ OptionWithArg, "--impala-version IMPALA_VERSION", "The Impala version to be installed", :impala_version ],
+      [ OptionWithArg, "--impala-conf IMPALA_CONF", "Impala startup configurations", :impala_conf ]
+    ])
+    commands.parse_options(["--impala-script"], [
+      [ OptionWithArg, "--impala-output IMPALA_OUTPUT", "S3 location to store Impala console output", :impala_output]
     ])
 
     opts.separator "\n  Pig Steps\n"
@@ -1911,8 +2230,10 @@ module Commands
       [ GlobalOption, "--key-pair-file FILE_PATH",   "Path to your local pem file for your EC2 key pair", :key_pair_file ], 
     ])
 
-    opts.separator "\n  Specifying Bootstrap Actions\n"
+    opts.separator "\n  Specifying Supported Products\n"
+    commands.parse_command(SupportedProductCommand, "--supported-product NAME", "Install a supported product")
 
+    opts.separator "\n  Specifying Bootstrap Actions\n"
     commands.parse_command(BootstrapActionCommand, "--bootstrap-action SCRIPT", "Run a bootstrap action script on all instances")
     commands.parse_options(["--bootstrap-action"], [
       [ OptionWithArg, "--bootstrap-name NAME",    "Set the name of the bootstrap action", :bootstrap_name ],
@@ -1920,12 +2241,11 @@ module Commands
    
 
     opts.separator "\n  Listing and Describing Job flows\n"
-
     commands.parse_command(ListActionCommand, "--list", "List all job flows created in the last 2 days")
     commands.parse_command(DescribeActionCommand, "--describe", "Dump a JSON description of the supplied job flows")
     commands.parse_command(PrintHiveVersionCommand, "--print-hive-version", "Prints the version of Hive that's currently active on the job flow")
     commands.parse_options(["--list", "--describe"], [
-      [ OptionWithArg, "--state NAME",   "Set the name of the bootstrap action", :state ],
+      [ OptionWithArg, "--state NAME",   "List all job flows in a given state (STARTING, RUNNING, etc.)", :state ],
       [ FlagOption,    "--active",       "List running, starting or shutting down job flows", :active ],
       [ FlagOption,    "--all",          "List all job flows in the last 2 weeks", :all ],
       [ OptionWithArg,    "--created-after=DATETIME", "List all jobflows created after DATETIME (xml date time format)", :created_after],
@@ -1941,6 +2261,17 @@ module Commands
 
     commands.parse_command(TerminateActionCommand, "--terminate", "Terminate job flows")
 
+    opts.separator "\n  Tagging\n"
+    commands.parse_command(ListTagsActionCommand, "--list-tags", "List Tags")
+    commands.parse_command(AddTagsActionCommand, "--add-tags", "Add tags to a cluster")
+    commands.parse_command(RemoveTagsActionCommand, "--remove-tags", "Remove tags from a cluster")
+    commands.parse_options(["--create", "--add-tags"], [
+      [ OptionWithArg, "--tag KEY[=VALUE]", "Tag to be added", :tags ],
+    ])
+    commands.parse_options(["--remove-tags"], [
+      [ OptionWithArg, "--tag-key TAG_KEY", "Key of the tag to be removed", :tag_keys ],
+    ])
+
     opts.separator "\n  Common Options\n"
     
     commands.parse_options(["--jobflow", "--describe"], [
@@ -1954,6 +2285,9 @@ module Commands
       [ GlobalOption, "--access-id ACCESS_ID",  "AWS Access Id", :aws_access_id],
       [ GlobalOption, "--private-key PRIVATE_KEY",  "AWS Private Key", :aws_secret_key],
       [ GlobalOption, "--log-uri LOG_URI",  "Location in S3 to store logs from the job flow, e.g. s3n://mybucket/logs", :log_uri ],
+      [ GlobalOption, "--http-proxy HTTP_PROXY", "HTTP proxy server address host[:port]", :http_proxy ],
+      [ GlobalOption, "--http-proxy-user USER", "The username supplied to the HTTP proxy", :http_proxy_user ],
+      [ GlobalOption, "--http-proxy-pass PASS", "The password supplied to the HTTP proxy", :http_proxy_pass ],
     ])
     commands.parse_command(VersionCommand, "--version", "Print version string")
     commands.parse_command(HelpCommand, "--help", "Show help message")
@@ -1965,7 +2299,6 @@ module Commands
       [ GlobalOption,     "--endpoint ENDPOINT",  "EMR web service host to connect to", :endpoint],
       [ GlobalOption,     "--region REGION",  "The region to use for the endpoint", :region],
       [ GlobalOption,     "--apps-path APPS_PATH",  "Specify s3:// path to the base of the emr public bucket to use. e.g s3://us-east-1.elasticmapreduce", :apps_path],
-      [ GlobalOption,     "--beta-path BETA_PATH",  "Specify s3:// path to the base of the emr public bucket to use for beta apps. e.g s3://beta.elasticmapreduce", :beta_path],
     ])
  
     opts.separator "\n  Short Options\n"
@@ -1992,6 +2325,7 @@ module Commands
     return is_step_command(cmd) || 
       is_ba_command(cmd) ||
       cmd.is_a?(AddInstanceGroupCommand) ||
+      cmd.is_a?(SupportedProductCommand) ||
       cmd.is_a?(CreateInstanceGroupCommand)
   end
 
@@ -2012,6 +2346,8 @@ module Commands
           elsif is_ba_command(cmd) then
             raise RuntimeError, "the option #{cmd.name} must come after the --create option"
           elsif cmd.is_a?(CreateInstanceGroupCommand) then
+            raise RuntimeError, "the option #{cmd.name} must come after the --create option"
+          elsif cmd.is_a?(SupportedProductCommand) then
             raise RuntimeError, "the option #{cmd.name} must come after the --create option"
           elsif cmd.is_a?(AddInstanceGroupCommand) then
             new_commands << cmd
@@ -2036,6 +2372,10 @@ module Commands
             raise RuntimeError, "Bootstrap actions must follow a --create command"
           end
           last_create_command.add_bootstrap_command(cmd)
+          actioned = true
+        end
+        if cmd.is_a?(SupportedProductCommand) then
+          last_create_command.add_supported_product_command(cmd)
           actioned = true
         end
         if cmd.is_a?(CreateInstanceGroupCommand) || cmd.is_a?(AddInstanceGroupCommand) then
@@ -2113,15 +2453,17 @@ module Commands
 
     if commands.have(:endpoint) then
       region_match = commands.get_field(:endpoint).match("^https*://(.*)\.elasticmapreduce")
+      # Supports 'elasticmapreduce.us-east-1.amazonaws.com' style endpoint as well because
+      # they are the official EMR endpoints: http://docs.aws.amazon.com/general/latest/gr/rande.html
+      if (region_match.nil?) then
+        region_match = commands.get_field(:endpoint).match("^https*://elasticmapreduce\.(.*)\.amazonaws\.com")
+      end
       if ! commands.have(:apps_path) && region_match != nil then
         options[:apps_path] = "s3://#{region_match[1]}.elasticmapreduce"
       end
     end
 
     options[:apps_path] ||= "s3://us-east-1.elasticmapreduce"
-    options[:beta_path] ||= "s3://beta.elasticmapreduce"
-    for key in [:apps_path, :beta_path] do
-      options[key].chomp!("/")
-    end
-  end 
+    options[:apps_path].chomp!("/")
+  end
 end

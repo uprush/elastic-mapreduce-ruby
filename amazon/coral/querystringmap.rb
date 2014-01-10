@@ -45,7 +45,7 @@ module Amazon
 
       def add_flattened_helper(stack, obj)
         return if obj.nil?
-        
+
         case obj
         when Hash then
 
@@ -69,6 +69,7 @@ module Amazon
           }
 
           stack.pop
+
         else
 
           # this works for symbols also, because sym.id2name == sym.to_s

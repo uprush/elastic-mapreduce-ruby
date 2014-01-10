@@ -267,6 +267,8 @@ module Commands
         "s3://us-east-1.elasticmapreduce/libs/pig/pig-script",
         "--base-path",
         "s3://us-east-1.elasticmapreduce/libs/pig/",
+        "--pig-versions",
+        "latest",
         "--run-pig-script",
         "--args",
         "-f"
@@ -278,11 +280,14 @@ module Commands
         "s3://us-east-1.elasticmapreduce/libs/hive/hive-script",
         "--base-path",
         "s3://us-east-1.elasticmapreduce/libs/hive/",
+        "--hive-versions",
+        "latest",
         "--run-hive-script",
         "--args",
         "-f"
       ]
     end
+    HIVE_SCRIPT_COMMAND_ARGS_VERSIONS_POS = 4;
 
     def test_pig_arg
       args1 = "-a ACCESS_ID -p SECRET_KEY --create --alive " +
@@ -324,7 +329,7 @@ module Commands
       assert_equal(hive_command.args, ["s3://maps.google.com"])
       assert_equal(hive_command.steps.size, 1)
       args = hive_script_command_default_args
-      args << "s3://maps.google.com" 
+      args << "s3://maps.google.com"
       assert_equal(hadoop_jar_step_args(hive_command), args)
     end
     
@@ -343,8 +348,7 @@ module Commands
       assert_equal(hive_command.args, ["s3://maps.google.com"])
       assert_equal(hive_command.steps.size, 1)
       args = hive_script_command_default_args
-      args.insert(3, "--hive-versions")
-      args.insert(4, "0.5")
+      args[HIVE_SCRIPT_COMMAND_ARGS_VERSIONS_POS] = "0.5";
       args  << "s3://maps.google.com"
       assert_equal(hadoop_jar_step_args(hive_command), args)
     end
@@ -365,8 +369,7 @@ module Commands
       assert_equal(hive_command.args, ["s3://maps.google.com"])
       assert_equal(hive_command.steps.size, 1)
       args = hive_script_command_default_args
-      args.insert(3, "--hive-versions")
-      args.insert(4, "0.5")
+      args[HIVE_SCRIPT_COMMAND_ARGS_VERSIONS_POS] = "0.5";
       args << "s3://maps.google.com"
       assert_equal(hadoop_jar_step_args(hive_command), args)
     end
@@ -387,8 +390,7 @@ module Commands
       assert_equal(hive_command.args, ["s3://maps.google.com"])
       assert_equal(hive_command.steps.size, 1)
       args = hive_script_command_default_args
-      args.insert(3, "--hive-versions")
-      args.insert(4, "0.7")
+      args[HIVE_SCRIPT_COMMAND_ARGS_VERSIONS_POS] = "0.7";
       args << "s3://maps.google.com"
       assert_equal(hadoop_jar_step_args(hive_command), args)
     end

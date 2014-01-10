@@ -35,6 +35,9 @@ module Amazon
         @runJobFlowDispatcher = Dispatcher.new(orchestrator, 'ElasticMapReduce', 'RunJobFlow')
         @modifyInstanceGroupsDispatcher = Dispatcher.new(orchestrator, 'ElasticMapReduce', 'ModifyInstanceGroups')
         @setVisibleToAllUsersDispatcher = Dispatcher.new(orchestrator, 'ElasticMapReduce', 'SetVisibleToAllUsers')
+        @addTagsDispatcher = Dispatcher.new(orchestrator, 'ElasticMapReduce', 'AddTags')
+        @removeTagsDispatcher = Dispatcher.new(orchestrator, 'ElasticMapReduce', 'RemoveTags')
+        @describeClusterDispatcher = Dispatcher.new(orchestrator, 'ElasticMapReduce', 'DescribeCluster')
       end
 
 
@@ -127,6 +130,20 @@ module Amazon
         Call.new(@modifyInstanceGroupsDispatcher)
       end
 
+      # Instantiates a call object to invoke the AddTags operation:
+      def newAddTagsCall
+        Call.new(@addTagsDispatcher)
+      end
+
+      # Instantiates a call object to invoke the RemoveTags operation:
+      def newRemoveTagsCall
+        Call.new(@removeTagsDispatcher)
+      end
+
+      # Instantiates a call object to invoke the DescribeCluster operation:
+      def newDescribeClusterCall
+        Call.new(@describeClusterDispatcher)
+      end
 
       # Shorthand method to invoke the AddJobFlowSteps operation:
       #
@@ -182,6 +199,20 @@ module Amazon
         newModifyInstanceGroupsCall.call(input)
       end
 
+      # Shorthand method to invoke the AddTags operation:
+      def AddTags(input = {})
+        newAddTagsCall.call(input)
+      end
+
+      # Shorthand method to invoke the RemoveTags operation:
+      def RemoveTags(input = {})
+        newRemoveTagsCall.call(input)
+      end
+
+      # Shorthand method to invoke the DescribeCluster operation:
+      def DescribeCluster(input = {})
+        newDescribeClusterCall.call(input)
+      end
 
       # Instantiates the client with an orchestrator configured for use with AWS/QUERY.
       # Use of this constructor is deprecated in favor of using the AwsQuery class:
@@ -202,7 +233,10 @@ module Amazon
                                                                 'DescribeJobFlows',
                                                                 'RunJobFlow',
                                                                 'ModifyInstanceGroups',
-                                                                'SetVisibleToAllUsers'
+                                                                'SetVisibleToAllUsers',
+                                                                'AddTags',
+                                                                'RemoveTags',
+                                                                'DescribeCluster'
                                                                ]).main if caller.empty?
   end
 end
